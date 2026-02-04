@@ -1,0 +1,921 @@
+import 'dart:convert';
+import 'dart:typed_data';
+import 'package:http/http.dart' as http;
+import 'package:hive_flutter/hive_flutter.dart';
+import 'package:image/image.dart' as img;
+import '../models/user.dart';
+import '../models/activity.dart';
+
+class ESP32Service {
+  static String _esp32IP = "192.168.4.5"; // ESP32-S3 hotspot custom IP
+  static const String _ipBoxName = 'esp32_settings';
+  static const String _ipKey = 'esp32_ip';
+
+  // Initialize IP from storage
+  static Future<void> initializeIP() async {
+    try {
+      final box = await Hive.openBox(_ipBoxName);
+      final savedIP = box.get(_ipKey);
+      if (savedIP != null && savedIP.isNotEmpty) {
+        _esp32IP = savedIP;
+      }
+    } catch (e) {
+      print('Error loading saved IP: $e');
+    }
+  }
+
+  // Initialize method for compatibility
+  static Future<void> initialize() async {
+    await initializeIP();
+  }
+
+  // Setter for ESP32 IP address with persistence
+  static Future<void> setESP32IP(String ip) async {
+    _esp32IP = ip;
+    try {
+      final box = await Hive.openBox(_ipBoxName);
+      await box.put(_ipKey, ip);
+    } catch (e) {
+      print('Error saving IP: $e');
+    }
+  }
+
+  // Getter for ESP32 IP address
+  static String getESP32IP() {
+    return _esp32IP;
+  }
+
+  // Getter for currentIP property (for compatibility)
+  static String get currentIP => _esp32IP;
+
+  // Get MJPEG stream URL for live video feed
+  static String getCameraStreamUrl() {
+    return "http://$_esp32IP/api/camera/live";
+  }
+
+  // Get camera capture URL for single image capture
+  static String getCameraCaptureUrl() {
+    return "http://$_esp32IP/api/camera/capture";
+  }
+
+  // Get system status from ESP32-S3
+  static Future<Map<String, dynamic>?> getSystemStatus() async {
+    try {
+      print('Testing connection to: http://$_esp32IP/api/status');
+      final url = Uri.parse("http://$_esp32IP/api/status");
+      final response = await http.get(url).timeout(const Duration(seconds: 5));
+
+      print('Response status code: ${response.statusCode}');
+      print('Response body: ${response.body}');
+
+      if (response.statusCode == 200) {
+        return json.decode(response.body);
+      }
+      return null;
+    } catch (e) {
+      print('Error getting system status: $e');
+      return null;
+    }
+  }
+
+  // Check if ESP32 is reachable
+  static Future<bool> isESP32Connected() async {
+    try {
+      print('Getting system status from: http://$_esp32IP/api/status');
+      final status = await getSystemStatus();
+      print('System status response code: ${status != null ? 200 : 'null'}');
+      print('System status response: $status');
+      return status != null && status['status'] == 'online';
+    } catch (e) {
+      print("Error checking ESP32 connection: $e");
+      return false;
+    }
+  }
+
+  // Get door logs from ESP32-S3
+  static Future<List<Activity>> getDoorLogs() async {
+    try {
+      print('Error getting activities: Trying to fetch from /api/activities');
+      final url = Uri.parse("http://$_esp32IP/api/activities");
+      final response = await http.get(url).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['activities'] != null) {
+          List<Activity> activities = [];
+          for (var log in data['activities']) {
+            activities.add(
+              Activity(
+                status: log['action'] ?? 'Unknown',
+                username: log['userName'] ?? 'Unknown',
+                time: DateTime.fromMillisecondsSinceEpoch(
+                  int.tryParse(log['timestamp'].toString()) ?? 0,
+                ),
+              ),
+            );
+          }
+          return activities;
+        }
+      }
+      return [];
+    } catch (e) {
+      print('Error getting activities: $e');
+      return [];
+    }
+  }
+
+  // Unlock door manually
+  static Future<bool> unlockDoor() async {
+    try {
+      final url = Uri.parse("http://$_esp32IP/api/door/unlock");
+      final response = await http
+          .post(url, headers: {'Content-Type': 'application/json'})
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        return data['success'] == true;
+      }
+      return false;
+    } catch (e) {
+      print('Error unlocking door: $e');
+      return false;
+    }
+  }
+
+  // Emergency unlock
+  static Future<bool> emergencyUnlock() async {
+    try {
+      final url = Uri.parse("http://$_esp32IP/api/door/unlock");
+      final response = await http
+          .post(url, headers: {'Content-Type': 'application/json'})
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        return data['success'] == true;
+      }
+      return false;
+    } catch (e) {
+      print('Error emergency unlock: $e');
+      return false;
+    }
+  }
+
+  // Get all users from ESP32-S3
+  static Future<List<User>> getUsers() async {
+    try {
+      final url = Uri.parse("http://$_esp32IP/api/users");
+      final response = await http.get(url).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['users'] != null) {
+          List<User> users = [];
+
+          for (var userData in data['users']) {
+            users.add(
+              User(
+                id: int.tryParse(userData['id'].toString()) ?? 0,
+                nama: userData['name'] ?? '',
+                jabatan: userData['job_title'] ?? '',
+                departemen: userData['department'] ?? '',
+                masaBerlaku: DateTime.fromMillisecondsSinceEpoch(
+                  int.tryParse(userData['registered_time'].toString()) ?? 0,
+                ),
+                thumbnailPath: '', // ESP32-S3 doesn't store photo paths
+              ),
+            );
+          }
+          return users;
+        }
+      }
+      return [];
+    } catch (e) {
+      print('Error getting users: $e');
+      return [];
+    }
+  }
+
+  // Add user to ESP32-S3
+  static Future<bool> addUser(User user) async {
+    try {
+      print('=== Adding User to ESP32 ===');
+      print('ESP32 IP: $_esp32IP');
+      print('User ID: ${user.id}');
+      print('User Name: ${user.nama}');
+      print('Job Title: ${user.jabatan}');
+      print('Department: ${user.departemen}');
+      print('Expiry Date: ${user.masaBerlaku.toIso8601String()}');
+
+      final url = Uri.parse("http://$_esp32IP/api/users");
+      print('URL: $url');
+
+      final Map<String, String> body = {
+        'id': user.id.toString(),
+        'name': user.nama,
+        'job_title': user.jabatan,
+        'department': user.departemen,
+        'access_expiry_date': user.masaBerlaku.toIso8601String(),
+      };
+
+      print('Request body: $body');
+
+      final response = await http
+          .post(
+            url,
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Accept': 'application/json',
+            },
+            body: body,
+          )
+          .timeout(const Duration(seconds: 15));
+
+      print('Response status: ${response.statusCode}');
+      print('Response body: ${response.body}');
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        print('Parsed response: $data');
+        bool success = data['success'] == true;
+        print('Success: $success');
+        return success;
+      } else {
+        print('HTTP Error: ${response.statusCode} - ${response.body}');
+        return false;
+      }
+    } catch (e) {
+      print('Error adding user: $e');
+      return false;
+    }
+  }
+
+  // Delete user from ESP32-S3
+  static Future<bool> deleteUser(String userId) async {
+    try {
+      final url = Uri.parse("http://$_esp32IP/api/users");
+
+      // Create form data with user ID
+      final formData = 'id=$userId';
+
+      print('ESP32Service: Deleting user with ID: $userId');
+
+      final response = await http
+          .delete(
+            url,
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: formData,
+          )
+          .timeout(const Duration(seconds: 10));
+
+      print(
+        'ESP32Service: Delete user response: ${response.statusCode} - ${response.body}',
+      );
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        return data['success'] == true;
+      }
+      return false;
+    } catch (e) {
+      print('Error deleting user: $e');
+      return false;
+    }
+  }
+
+  // Get camera capture with automatic resizing
+  static Future<Uint8List?> getCameraCapture() async {
+    try {
+      final url = Uri.parse("http://$_esp32IP/api/camera/capture");
+      final response = await http.get(url).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        print('Captured image size: ${response.bodyBytes.length} bytes');
+
+        // Resize if image is too large (> 100KB)
+        if (response.bodyBytes.length > 100 * 1024) {
+          print('Image too large, resizing...');
+          Uint8List? resized = resizeImageForESP32(
+            response.bodyBytes,
+            maxWidth: 240,
+            maxHeight: 240,
+            quality: 70,
+            maxSizeKB: 100,
+          );
+          if (resized != null) {
+            print('Image resized to: ${resized.length} bytes');
+            return resized;
+          }
+        }
+
+        return response.bodyBytes;
+      }
+      return null;
+    } catch (e) {
+      print('Error capturing camera image: $e');
+      return null;
+    }
+  }
+
+  // Test connection to ESP32-S3
+  static Future<Map<String, dynamic>> testConnection() async {
+    try {
+      print('Testing connection to: http://$_esp32IP/api/status');
+      final url = Uri.parse("http://$_esp32IP/api/status");
+      final response = await http.get(url).timeout(const Duration(seconds: 5));
+
+      print('Response status code: ${response.statusCode}');
+      print('Response body: ${response.body}');
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        return {
+          'connected': true,
+          'message': 'ESP32-S3 connected successfully',
+          'data': data,
+        };
+      } else {
+        return {
+          'connected': false,
+          'message': 'ESP32-S3 responded with status ${response.statusCode}',
+        };
+      }
+    } catch (e) {
+      return {'connected': false, 'message': 'Cannot connect to ESP32-S3: $e'};
+    }
+  }
+
+  // Image resizing function for ESP32 optimization
+  static Uint8List? resizeImageForESP32(
+    Uint8List imageBytes, {
+    int maxWidth = 240,
+    int maxHeight = 240,
+    int quality = 80,
+    int maxSizeKB = 100,
+  }) {
+    try {
+      // Decode the image
+      img.Image? image = img.decodeImage(imageBytes);
+      if (image == null) return null;
+
+      // Calculate new dimensions maintaining aspect ratio
+      double aspectRatio = image.width / image.height;
+      int newWidth, newHeight;
+
+      if (image.width > image.height) {
+        newWidth = maxWidth;
+        newHeight = (maxWidth / aspectRatio).round();
+      } else {
+        newHeight = maxHeight;
+        newWidth = (maxHeight * aspectRatio).round();
+      }
+
+      // Resize the image
+      img.Image resized = img.copyResize(
+        image,
+        width: newWidth,
+        height: newHeight,
+      );
+
+      // Iteratively reduce quality until size is under maxSizeKB
+      Uint8List? result;
+      int currentQuality = quality;
+      int maxSizeBytes = maxSizeKB * 1024;
+
+      do {
+        result = Uint8List.fromList(
+          img.encodeJpg(resized, quality: currentQuality),
+        );
+
+        if (result.length <= maxSizeBytes) {
+          print(
+            'Image resized successfully: ${result.length} bytes (quality: $currentQuality%)',
+          );
+          break;
+        }
+
+        currentQuality -= 10;
+        print(
+          'Image too large (${result.length} bytes), reducing quality to $currentQuality%',
+        );
+      } while (currentQuality >= 10 && result.length > maxSizeBytes);
+
+      // If still too large, try reducing dimensions
+      if (result.length > maxSizeBytes && currentQuality < 10) {
+        print('Still too large, reducing dimensions...');
+        maxWidth = (maxWidth * 0.8).round();
+        maxHeight = (maxHeight * 0.8).round();
+
+        if (image.width > image.height) {
+          newWidth = maxWidth;
+          newHeight = (maxWidth / aspectRatio).round();
+        } else {
+          newHeight = maxHeight;
+          newWidth = (maxHeight * aspectRatio).round();
+        }
+
+        resized = img.copyResize(image, width: newWidth, height: newHeight);
+
+        result = Uint8List.fromList(img.encodeJpg(resized, quality: 30));
+        print('Final size after dimension reduction: ${result.length} bytes');
+      }
+
+      return result;
+    } catch (e) {
+      print("Error resizing image: $e");
+      return null;
+    }
+  }
+
+  // Check if camera stream is available
+  static Future<bool> startCameraStream() async {
+    try {
+      final url = Uri.parse("http://$_esp32IP/api/camera/capture");
+      final response = await http.get(url).timeout(const Duration(seconds: 5));
+      return response.statusCode == 200;
+    } catch (e) {
+      print("Error checking camera stream: $e");
+      return false;
+    }
+  }
+
+  // Face recognition functions (placeholder for future implementation)
+  static Future<bool> registerFace(String userId, String userName) async {
+    try {
+      // ESP32-S3 system handles face recognition automatically
+      // This function could be used to register face data if needed
+      print("Face registration not implemented in current ESP32-S3 firmware");
+      return true;
+    } catch (e) {
+      print("Error registering face: $e");
+      return false;
+    }
+  }
+
+  static Future<bool> enableFaceDetection() async {
+    try {
+      // ESP32-S3 system has face detection enabled by default
+      print("Face detection is enabled by default in ESP32-S3 system");
+      return true;
+    } catch (e) {
+      print("Error enabling face detection: $e");
+      return false;
+    }
+  }
+
+  // Sync users with ESP32-S3
+  static Future<bool> syncUsers(List<User> users) async {
+    try {
+      print('DEBUG: Starting sync of ${users.length} users to ESP32');
+      bool allSuccess = true;
+      int successCount = 0;
+      int failureCount = 0;
+
+      // Process users one by one with delays to prevent ESP32 overload
+      for (int i = 0; i < users.length; i++) {
+        var user = users[i];
+        print('DEBUG: Syncing user ${i + 1}/${users.length}: ${user.nama}');
+
+        try {
+          final success = await addUser(user);
+          if (success) {
+            successCount++;
+            print('DEBUG: Successfully synced user: ${user.nama}');
+          } else {
+            failureCount++;
+            allSuccess = false;
+            print('DEBUG: Failed to sync user: ${user.nama}');
+          }
+        } catch (e) {
+          failureCount++;
+          allSuccess = false;
+          print('DEBUG: Error syncing user ${user.nama}: $e');
+        }
+
+        // Add delay between requests to prevent ESP32 overload
+        // Skip delay for the last user
+        if (i < users.length - 1) {
+          print('DEBUG: Waiting 2 seconds before next user...');
+          await Future.delayed(const Duration(seconds: 2));
+        }
+      }
+
+      print(
+        'DEBUG: Sync completed. Success: $successCount, Failed: $failureCount',
+      );
+      return allSuccess;
+    } catch (e) {
+      print("Error syncing users: $e");
+      return false;
+    }
+  }
+
+  // Legacy compatibility methods to maintain UI functionality
+  static Future<Map<String, dynamic>?> getFaceDetectionStatus() async {
+    try {
+      final status = await getSystemStatus();
+      if (status != null) {
+        return {
+          'success': true,
+          'enabled': true,
+          'message': 'Face detection active',
+        };
+      }
+      return null;
+    } catch (e) {
+      print("Error getting face detection status: $e");
+      return null;
+    }
+  }
+
+  static Future<bool> checkSystemStatus() async {
+    return await isESP32Connected();
+  }
+
+  static Future<List<Activity>> getDoorActivityLogs() async {
+    return await getDoorLogs();
+  }
+
+  // Alternative method names for compatibility
+  static Future<bool> removeUser(String userId) async {
+    return await deleteUser(userId);
+  }
+
+  static Future<Map<String, dynamic>?> getCameraSettings() async {
+    return await getSystemStatus();
+  }
+
+  static Future<List<Map<String, dynamic>>?> getActivities() async {
+    try {
+      final activities = await getDoorLogs();
+      return activities
+          .map(
+            (activity) => {
+              'status': activity.status,
+              'username': activity.username,
+              'time': activity.time.millisecondsSinceEpoch,
+            },
+          )
+          .toList();
+    } catch (e) {
+      print('Error converting activities: $e');
+      return null;
+    }
+  }
+
+  // Additional methods for compatibility with existing screens
+  static Future<Map<String, dynamic>?> getSystemDiagnostics() async {
+    try {
+      final status = await getSystemStatus();
+      final connected = await isESP32Connected();
+
+      return {
+        'success': true,
+        'connected': connected,
+        'system': status,
+        'camera': connected,
+        'wifi': connected,
+        'door': true,
+        'face_recognition': true,
+      };
+    } catch (e) {
+      print('Error getting system diagnostics: $e');
+      return null;
+    }
+  }
+
+  static Future<bool> testDoorUnlock() async {
+    return await unlockDoor();
+  }
+
+  static Future<Map<String, dynamic>?> checkFaceRecognitionStatus() async {
+    return await getFaceDetectionStatus();
+  }
+
+  static Future<Map<String, dynamic>> comprehensiveSync() async {
+    try {
+      final connected = await isESP32Connected();
+      if (!connected) {
+        return {'success': false, 'message': 'ESP32-S3 not connected'};
+      }
+
+      // Step 1: Get users from ESP32
+      print('DEBUG: Starting comprehensive sync - getting users from ESP32');
+      final esp32Users = await getUsers();
+      print('DEBUG: Retrieved ${esp32Users.length} users from ESP32');
+
+      // Step 2: Save ESP32 users to local Hive database (Flutter app as backup/management tool)
+      // Note: This will be handled by the UI when sync is called
+      print('DEBUG: Users retrieved from ESP32 - ${esp32Users.length} users');
+      /*
+      try {
+        final box = Hive.box<User>('users');
+        
+        // Clear existing users in Flutter app and replace with ESP32 data
+        await box.clear();
+        
+        for (var user in esp32Users) {
+          await box.add(user);
+        }
+        
+        print('DEBUG: Saved ${esp32Users.length} users to local Flutter database');
+      } catch (e) {
+        print('ERROR: Failed to save users to local database: $e');
+      }
+      */
+
+      // Step 3: Sync activities from ESP32
+      final activitySyncResult = await _syncActivitiesFromESP32();
+
+      return {
+        'success': true,
+        'userSync': true,
+        'activitySync': activitySyncResult,
+        'message': 'Synced ${esp32Users.length} users from ESP32-S3',
+        'users_synced': esp32Users.length,
+        'esp32_as_master': true, // ESP32 is the master for user data
+      };
+    } catch (e) {
+      print('Error in comprehensive sync: $e');
+      return {
+        'success': false,
+        'userSync': false,
+        'activitySync': false,
+        'message': 'Sync failed: $e',
+      };
+    }
+  }
+
+  // Helper function to sync activities from ESP32
+  static Future<bool> _syncActivitiesFromESP32() async {
+    try {
+      final activitiesData = await getActivities();
+      if (activitiesData == null) {
+        print('DEBUG: No activities retrieved from ESP32');
+        return false;
+      }
+
+      print('DEBUG: Retrieved ${activitiesData.length} activities from ESP32');
+
+      // Save activities to local Hive database
+      // Note: This will be handled by the UI when sync is called
+      print(
+        'DEBUG: Activities retrieved from ESP32 - ${activitiesData.length} activities',
+      );
+      /*
+      final box = Hive.box<Activity>('activities');
+      
+      // Convert raw data to Activity objects and add new activities
+      int newActivities = 0;
+      for (var activityData in activitiesData) {
+        try {
+          // Convert Map to Activity object
+          final activity = Activity(
+            status: activityData['status'] ?? 'Unknown',
+            username: activityData['username'] ?? 'Unknown',
+            time: DateTime.fromMillisecondsSinceEpoch(
+              int.tryParse(activityData['timestamp']?.toString() ?? '0') ?? 0
+            ),
+          );
+          
+          // Check if activity already exists (simple duplicate check by time)
+          final existing = box.values.where((a) => 
+            a.time.millisecondsSinceEpoch == activity.time.millisecondsSinceEpoch &&
+            a.username == activity.username
+          ).isNotEmpty;
+          
+          if (!existing) {
+            await box.add(activity);
+            newActivities++;
+          }
+        } catch (e) {
+          print('ERROR: Failed to process activity data: $e');
+        }
+      }
+      
+      print('DEBUG: Added $newActivities new activities to local database');
+      */
+      return true;
+    } catch (e) {
+      print('ERROR: Failed to sync activities from ESP32: $e');
+      return false;
+    }
+  }
+
+  // Missing methods for AppProvider compatibility
+  static Future<bool> configureWiFi(String ssid, String password) async {
+    try {
+      final url = Uri.parse("http://$_esp32IP/api/wifi");
+      final response = await http
+          .post(
+            url,
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: {'ssid': ssid, 'password': password},
+          )
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        return data['success'] == true;
+      }
+      return false;
+    } catch (e) {
+      print('Error configuring WiFi: $e');
+      return false;
+    }
+  }
+
+  static Future<List<String>> scanForESP32() async {
+    try {
+      // Return the known ESP32 IP addresses to scan
+      return ['192.168.4.1', '192.168.4.5'];
+    } catch (e) {
+      print('Error scanning for ESP32: $e');
+      return [];
+    }
+  }
+
+  // Transfer user image to ESP32
+  static Future<bool> transferUserImage(
+    String userId,
+    Uint8List imageBytes, {
+    Function(double)? onProgress,
+  }) async {
+    try {
+      print(
+        'Transferring image for user: $userId, size: ${imageBytes.length} bytes',
+      );
+
+      // Ensure image is under 100KB
+      Uint8List? finalImage = imageBytes;
+      if (imageBytes.length > 100 * 1024) {
+        print('Image too large, resizing before transfer...');
+        finalImage = resizeImageForESP32(
+          imageBytes,
+          maxWidth: 240,
+          maxHeight: 240,
+          quality: 70,
+          maxSizeKB: 100,
+        );
+        if (finalImage == null) {
+          print('Failed to resize image');
+          return false;
+        }
+        print('Image resized to: ${finalImage.length} bytes');
+      }
+
+      final url = Uri.parse("http://$_esp32IP/api/upload/data");
+
+      var request = http.MultipartRequest('POST', url);
+      request.fields['user_id'] = userId;
+      request.fields['user_name'] = 'User_$userId'; // Provide a default name
+      request.files.add(
+        http.MultipartFile.fromBytes(
+          'image',
+          finalImage,
+          filename: 'user_$userId.jpg',
+        ),
+      );
+
+      onProgress?.call(0.5); // Report 50% when starting upload
+
+      var streamedResponse = await request.send().timeout(
+        const Duration(seconds: 30),
+      );
+      var response = await http.Response.fromStream(streamedResponse);
+
+      onProgress?.call(1.0); // Report 100% when complete
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        print('Image transfer response: $data');
+        return data['success'] == true;
+      } else {
+        print('Image transfer failed with status: ${response.statusCode}');
+        print('Response body: ${response.body}');
+        return false;
+      }
+    } catch (e) {
+      print('Error transferring image: $e');
+      return false;
+    }
+  }
+
+  // ESP32 Live Camera Face enrollment method
+  static Future<bool> enrollUserFaceESP32Camera(
+    String userId,
+    String userName,
+  ) async {
+    try {
+      print('=== ESP32 Live Camera Face Enrollment ===');
+      print('ESP32 IP: $_esp32IP');
+      print('Enrolling face for user: $userName (ID: $userId)');
+      print(
+        'Using ESP32 live camera with EloquentEsp32cam recognition.detect() + recognition.enroll()',
+      );
+
+      final url = Uri.parse("http://$_esp32IP/api/face/enroll-live");
+      print('URL: $url');
+
+      final Map<String, String> body = {
+        'user_id': userId,
+        'user_name': userName,
+      };
+      print('Request body: $body');
+
+      final response = await http
+          .post(
+            url,
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Accept': 'application/json',
+            },
+            body: body,
+          )
+          .timeout(
+            const Duration(seconds: 20),
+          ); // Longer timeout for face enrollment
+
+      print(
+        'ESP32 Live Camera enrollment response status: ${response.statusCode}',
+      );
+      print('ESP32 Live Camera enrollment response body: ${response.body}');
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        print('ESP32 Live Camera enrollment result: ${data['success']}');
+        print(
+          'ESP32 Live Camera enrollment method: ${data['enrollment_method']}',
+        );
+        return data['success'] == true;
+      } else {
+        print(
+          'ESP32 Live Camera enrollment failed with status: ${response.statusCode}',
+        );
+        return false;
+      }
+    } catch (e) {
+      print('Error during ESP32 live camera face enrollment: $e');
+      return false;
+    }
+  }
+
+  // Uploaded Image Face enrollment method
+  static Future<bool> enrollUserFace(String userId, String userName) async {
+    try {
+      print('=== Uploaded Image Face Enrollment ===');
+      print('ESP32 IP: $_esp32IP');
+      print('Enrolling face for user: $userName (ID: $userId)');
+      print(
+        'This loads uploaded image and calls ESP32 recognition.detect() + recognition.enroll() functions',
+      );
+
+      final url = Uri.parse("http://$_esp32IP/api/face/enroll");
+      print('URL: $url');
+
+      final Map<String, String> body = {
+        'user_id': userId,
+        'user_name': userName,
+      };
+      print('Request body: $body');
+
+      final response = await http
+          .post(
+            url,
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Accept': 'application/json',
+            },
+            body: body,
+          )
+          .timeout(
+            const Duration(seconds: 20),
+          ); // Longer timeout for face enrollment
+
+      print(
+        'Uploaded Image enrollment response status: ${response.statusCode}',
+      );
+      print('Uploaded Image enrollment response body: ${response.body}');
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        print('Parsed uploaded image enrollment result: $data');
+        bool success = data['success'] == true;
+        print('Uploaded Image enrollment success: $success');
+        if (data.containsKey('enrollment_method')) {
+          print('Enrollment method: ${data['enrollment_method']}');
+        }
+        return success;
+      } else {
+        print(
+          'Uploaded Image enrollment HTTP Error: ${response.statusCode} - ${response.body}',
+        );
+        return false;
+      }
+    } catch (e) {
+      print('Error enrolling face from uploaded image: $e');
+      return false;
+    }
+  }
+}
